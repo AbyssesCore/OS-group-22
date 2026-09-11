@@ -1,0 +1,169 @@
+1
+00:00:04,000 --> 00:00:10,720
+For disk layouts with one or more file systems, 
+we will look at two boot and partitioning layouts:  
+
+2
+00:00:10,720 --> 00:00:20,480
+the Master Boot Record (MBR), an old legacy layout 
+not much used today, and UEFI together with GPT,  
+
+3
+00:00:20,480 --> 00:00:28,240
+the GUID Partition Table, where GUID 
+stands for Globally Unique Identifier.
+
+4
+00:00:28,240 --> 00:00:33,120
+With the MBR layout, a disk 
+can have different partitions,  
+
+5
+00:00:33,120 --> 00:00:38,640
+each containing an independent file system. 
+Each partition begins with a boot block,  
+
+6
+00:00:38,640 --> 00:00:43,920
+which contains executable code 
+that, once loaded into memory,  
+
+7
+00:00:43,920 --> 00:00:50,560
+can start the operating system associated with 
+that partition, if the partition contains one  
+
+8
+00:00:50,560 --> 00:00:59,040
+OS. The blocks after the boot block depend on 
+the specific file system in that partition.
+
+9
+00:00:59,040 --> 00:01:04,160
+At the beginning of the disk, we have the 
+Master Boot Record. The MBR is the first  
+
+10
+00:01:04,160 --> 00:01:11,360
+sector and contains both boot code and the 
+partition table. When the machine starts,  
+
+11
+00:01:11,360 --> 00:01:15,200
+it loads the executable in the 
+MBR, which reads the partition  
+
+12
+00:01:15,200 --> 00:01:22,880
+table and chooses which partition to use 
+to load the OS, possibly asking the user.
+
+13
+00:01:22,880 --> 00:01:29,680
+The partition table contains the addresses of the 
+partitions. If one partition is marked as active,  
+
+14
+00:01:29,680 --> 00:01:36,640
+it is selected to load the operating system 
+by reading that partition’s boot block.
+
+15
+00:01:36,640 --> 00:01:43,120
+The MBR layout has been used for decades, 
+especially when rotating disks were common  
+
+16
+00:01:43,120 --> 00:01:50,720
+in computers and laptops. It has several 
+limitations. The MBR is limited to 512 bytes,  
+
+17
+00:01:50,720 --> 00:01:56,480
+including the partition table, so it often 
+cannot contain all the code needed to boot  
+
+18
+00:01:56,480 --> 00:02:02,320
+and must load more code from another 
+disk section. It also supports only up  
+
+19
+00:02:02,320 --> 00:02:10,880
+to four primary partitions. With legacy BIOS 
+booting, execution starts in 16-bit real mode,  
+
+20
+00:02:10,880 --> 00:02:17,600
+using 16-bit registers and instructions, without 
+paging, which is no longer how modern hardware  
+
+21
+00:02:17,600 --> 00:02:23,920
+normally works. Finally, given the bits used 
+for the partition start address and size,  
+
+22
+00:02:23,920 --> 00:02:33,120
+and the assumed sector size, MBR can 
+only handle partitions up to about 2 TB.
+
+23
+00:02:33,120 --> 00:02:39,920
+Let's move now to the Unified Extensible 
+Firmware Interface (UEFI), which is the common  
+
+24
+00:02:39,920 --> 00:02:45,680
+layout today, and which is more complex but 
+offers richer features. The first block is still  
+
+25
+00:02:45,680 --> 00:02:53,840
+reserved for an MBR in case legacy tools expect 
+it. This is called the protective MBR. It tells  
+
+26
+00:02:53,840 --> 00:03:02,160
+legacy MBR tools that the disk is occupied, 
+so they do not treat the GPT disk as empty.
+
+27
+00:03:02,160 --> 00:03:05,360
+After that, block 1 contains the GPT header,  
+
+28
+00:03:05,360 --> 00:03:12,800
+followed by the GPT partition-entry array. 
+The actual partitions follow after that.
+
+29
+00:03:12,800 --> 00:03:18,320
+At the end of the disk, there is a backup copy 
+of the GPT. This backup contains a backup header  
+
+30
+00:03:18,320 --> 00:03:26,160
+and partition entries, so the partition table 
+can be recovered if the primary GPT is damaged.
+
+31
+00:03:26,160 --> 00:03:31,840
+One difference with MBR is that we are not 
+only loading a small program that decides  
+
+32
+00:03:31,840 --> 00:03:37,280
+which operating system to load. Instead, 
+there is a specific partition called the  
+
+33
+00:03:37,280 --> 00:03:44,400
+EFI System Partition, which contains a proper 
+file system and executables. More concretely,  
+
+34
+00:03:44,400 --> 00:03:54,000
+UEFI loads .efi boot programs 
+from the EFI System Partition.
+
