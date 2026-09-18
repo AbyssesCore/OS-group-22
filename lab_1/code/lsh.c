@@ -38,17 +38,10 @@ static void print_cmd(Command *cmd);
 static void print_pgm(Pgm *p);
 void stripwhite(char *);
 
-
-int breakStringToStringArray(char* string, char breakBy, char ***arrayPointer);
-
 int main(void)
 {
 	int pipefds[2];
 	int count, err;
-
-	char **pathArray;
-	
-	int pathCount = breakStringToStringArray(getenv("PATH"), ':', &pathArray);
 
 	if (pipe(pipefds)) {
 		perror("pipe");
@@ -64,6 +57,12 @@ int main(void)
 	    char *line;
 	    line = readline("> ");
 
+		// CTRL+D: exit
+		if(line == NULL) {
+			printf("Exiting...\n");
+			exit(0);
+		}
+
 	    // Remove leading and trailing whitespace from the line
 	    stripwhite(line);
 
@@ -77,7 +76,14 @@ int main(void)
 	      {
 		// Print the parsed command
 		print_cmd(&cmd);
-		
+
+		// Handle the "exit" command (terminate the shell)
+		if(strcmp(cmd.pgm->pgmlist[0], "exit") == 0) {
+			free(line);
+			printf("Exiting...\n");
+			exit(0);
+		}
+
 		pid_t pid = fork();
 		if (pid < 0) {
 			printf("error accured!");
@@ -86,15 +92,8 @@ int main(void)
 		else if (pid == 0) {
 			close(pipefds[0]);
 
-			char* newArg = malloc(6+strlen(cmd.pgm->pgmlist[0]));
-			newArg[0] = '\0';	
-			
-			strcat(newArg,"/bin/");
-			strcat(newArg,cmd.pgm->pgmlist[0]);
-			
-			printf("new Argument: %s\n", newArg);
-		
-			int result = execlp(newArg, cmd.pgm->pgmlist[0], NULL);
+			// We can pass pgmlist as a vector into execvp, instead of manually parsing list elements into execlp
+			int result = execvp(cmd.pgm->pgmlist[0], cmd.pgm->pgmlist);
 			
 			printf("child process %d - %s \n", result, strerror(errno));
 			write(pipefds[1], &errno, sizeof(int));
