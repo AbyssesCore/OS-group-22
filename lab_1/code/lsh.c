@@ -23,71 +23,128 @@
 #include <string.h>
 #include <readline/readline.h>
 #include <readline/history.h>
+#include <errno.h>
 
 // The <unistd.h> header is your gateway to the OS's process management facilities.
 #include <unistd.h>
 
 #include "parse.h"
 
+#include <sysexits.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+
 static void print_cmd(Command *cmd);
 static void print_pgm(Pgm *p);
 void stripwhite(char *);
 
+
+int breakStringToStringArray(char* string, char breakBy, char ***arrayPointer);
+
 int main(void)
 {
-  for (;;)
-  {
-    char *line;
-    line = readline("> ");
+	int pipefds[2];
+	int count, err;
 
-    // Remove leading and trailing whitespace from the line
-    stripwhite(line);
+	char **pathArray;
+	
+	int pathCount = breakStringToStringArray(getenv("PATH"), ':', &pathArray);
 
-    // If the stripped line is not blank
-    if (*line)
-    {
-      add_history(line);
+	if (pipe(pipefds)) {
+		perror("pipe");
+		return EX_OSERR;
+    	}
+    	if (fcntl(pipefds[1], F_SETFD, fcntl(pipefds[1], F_GETFD) | FD_CLOEXEC)) {
+		perror("fcntl");
+		return EX_OSERR;
+    	}	
+ 	
+	for (;;)
+  	{
+	    char *line;
+	    line = readline("> ");
 
-      Command cmd;
-      if (parse(line, &cmd) == 1)
-      {
-        // Print the parsed command
-        print_cmd(&cmd);
-      }
-      else
-      {
-        printf("Parse ERROR\n");
-      }
-    }
+	    // Remove leading and trailing whitespace from the line
+	    stripwhite(line);
 
-    // Free the input buffer
-    free(line);
-  }
+	    // If the stripped line is not blank
+	    if (*line)
+	    {
+	      add_history(line);
 
-  return 0;
-}
+	      Command cmd;
+	      if (parse(line, &cmd) == 1)
+	      {
+		// Print the parsed command
+		print_cmd(&cmd);
+		
+		pid_t pid = fork();
+		if (pid < 0) {
+			printf("error accured!");
+			return -1;
+		}
+		else if (pid == 0) {
+			close(pipefds[0]);
 
-/*
- * Print a Command structure as returned by parse on stdout.
- *
- * Helper function, no need to change. Might be useful to study as inspiration.
- */
-static void print_cmd(Command *cmd_list)
-{
-  printf("------------------------------\n");
-  printf("Parse OK\n");
-  printf("stdin:      %s\n", cmd_list->rstdin ? cmd_list->rstdin : "<none>");
-  printf("stdout:     %s\n", cmd_list->rstdout ? cmd_list->rstdout : "<none>");
-  printf("background: %s\n", cmd_list->background ? "true" : "false");
-  printf("Pgms:\n");
-  print_pgm(cmd_list->pgm);
-  printf("------------------------------\n");
-}
+			char* newArg = malloc(6+strlen(cmd.pgm->pgmlist[0]));
+			newArg[0] = '\0';	
+			
+			strcat(newArg,"/bin/");
+			strcat(newArg,cmd.pgm->pgmlist[0]);
+			
+			printf("new Argument: %s\n", newArg);
+		
+			int result = execlp(newArg, cmd.pgm->pgmlist[0], NULL);
+			
+			printf("child process %d - %s \n", result, strerror(errno));
+			write(pipefds[1], &errno, sizeof(int));
+			return 0;
+		}
+		else {
+			close(pipefds[1]);
+			while ((count = read(pipefds[0], &err, sizeof(errno))) == -1)
+			    if (errno != EAGAIN && errno != EINTR) break;
+			if (count) {
+			    fprintf(stderr, "child's execvp: %s\n", strerror(err));
+			}
+			close(pipefds[0]);
+		}
+		
+	      }
+	      else
+	      {
+		printf("Parse ERROR\n");
+	      }
+	    }
 
-/* Print a linked list of Pgm structures.
- *
- * Helper function, no need to change. It may be useful to study for inspiration.
- */
+	    // Free the input buffer
+	    free(line);
+	  }
+
+	  return 0;
+	}
+
+	/*
+	 * Print a Command structure as returned by parse on stdout.
+	 *
+	 * Helper function, no need to change. Might be useful to study as inspiration.
+	 */
+	static void print_cmd(Command *cmd_list)
+	{
+	  printf("------------------------------\n");
+	  printf("Parse OK\n");
+	  printf("stdin:      %s\n", cmd_list->rstdin ? cmd_list->rstdin : "<none>");
+	  printf("stdout:     %s\n", cmd_list->rstdout ? cmd_list->rstdout : "<none>");
+	  printf("background: %s\n", cmd_list->background ? "true" : "false");
+	  printf("Pgms:\n");
+	  print_pgm(cmd_list->pgm);
+	  printf("------------------------------\n");
+	}
+
+	/* Print a linked list of Pgm structures.
+	 *
+	 * Helper function, no need to change. It may be useful to study for inspiration.
+	 */
 static void print_pgm(Pgm *p)
 {
   if (p == NULL)
@@ -137,4 +194,35 @@ void stripwhite(char *string)
   }
 
   string[++i] = '\0';
+}
+
+#define ResizeBy 8
+
+int breakStringToStringArray(char* string, char breakBy, char ***arrayPointer) {
+	size_t strLen = strlen(string);
+	
+	char* newString = malloc(strLen);
+	
+	*arrayPointer = malloc(sizeof(char**) * ResizeBy);
+
+	int progress = 0;
+	
+	(*arrayPointer)[progress++] = newString;	
+	
+	memcpy(newString, string, strLen);
+	
+	for (char *ptr = newString; *ptr != '\0'; ptr++) {
+		if (*ptr == breakBy) {
+			*ptr = '\0';
+			
+			if (progress % ResizeBy == 0)
+				*arrayPointer = realloc(*arrayPointer, sizeof(char**) * (ResizeBy + progress));
+			
+			(*arrayPointer)[progress++] = ptr + 1;	
+		}
+
+	}
+
+	return progress;
+
 }
