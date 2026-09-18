@@ -40,6 +40,8 @@ static void print_cmd(Command *cmd);
 static void print_pgm(Pgm *p);
 void stripwhite(char *);
 
+int run_command(Pgm *pgm);
+
 int main(void)
 {
   int pipefds[2];
@@ -79,6 +81,7 @@ int main(void)
       Command cmd;
       if (parse(line, &cmd) == 1)
       {
+
         // Print the parsed command
         print_cmd(&cmd);
 
@@ -88,6 +91,11 @@ int main(void)
           free(line);
           printf("Exiting...\n");
           exit(0);
+        }
+        else if (strcmp(cmd.pgm->pgmlist[0], "cd") == 0)
+        {
+          chdir(cmd.pgm->pgmlist[1]);
+          continue;
         }
 
         pid_t pid = fork();
@@ -102,10 +110,13 @@ int main(void)
 
           // We can pass pgmlist as a vector into execvp, instead of manually
           // parsing list elements into execlp
-          int result = execvp(cmd.pgm->pgmlist[0], cmd.pgm->pgmlist);
+
+          run_command(cmd.pgm);
+
+          /*int result = execvp(cmd.pgm->pgmlist[0], cmd.pgm->pgmlist);
 
           printf("child process %d - %s \n", result, strerror(errno));
-          write(pipefds[1], &errno, sizeof(int));
+          write(pipefds[1], &errno, sizeof(int)); */
           return 0;
         }
         else
@@ -118,6 +129,7 @@ int main(void)
           {
             fprintf(stderr, "child's execvp: %s\n", strerror(err));
           }
+          wait(NULL);
           close(pipefds[0]);
         }
       }
@@ -131,6 +143,70 @@ int main(void)
     free(line);
   }
 
+  return 0;
+}
+
+int run_command(Pgm *pgm)
+{
+  if (pgm == NULL)
+  {
+    return -1;
+  }
+
+  int pipefds[2];
+  if (pipe(pipefds))
+  {
+    perror("pipe");
+    return EX_OSERR;
+  }
+  if (fcntl(pipefds[1], F_SETFD, fcntl(pipefds[1], F_GETFD) | FD_CLOEXEC))
+  {
+    perror("fcntl");
+    return EX_OSERR;
+  }
+
+  pid_t pid = fork();
+  if (pid < 0)
+  {
+    printf("error accured!");
+    return -1;
+  }
+  else if (pid == 0)
+  {
+    close(pipefds[0]);
+    // We can pass pgmlist as a vector into execvp, instead of manually
+    // parsing list elements into execlp
+    run_command(pgm->next);
+
+    char **args = pgm->pgmlist;
+    int result = execvp(args[0], args);
+
+    printf("child process %d - %s \n", result, strerror(errno));
+
+
+    char *out = "test";
+
+    write(pipefds[1], &errno, sizeof(int));
+    close(pipefds[1]);
+    return 0;
+  }
+  else
+  {
+    close(pipefds[1]);
+
+    int count;
+    char *buff = malloc(100 * sizeof(char));
+    int err = 12345678;
+    while ((count = read(pipefds[0], &err, sizeof(errno))) == -1)
+      if (errno != EAGAIN && errno != EINTR)
+        break;
+    wait(NULL);
+    {
+      fprintf(stderr, "child's execvp: %d\n", err);
+    }
+    close(pipefds[0]);
+    free(buff);
+  }
   return 0;
 }
 
