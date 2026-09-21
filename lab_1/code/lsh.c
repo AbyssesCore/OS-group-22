@@ -35,24 +35,35 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <sysexits.h>
+#include <signal.h>
 
 static void print_cmd(Command *cmd);
 static void print_pgm(Pgm *p);
 void stripwhite(char *);
 
-void run_command(Pgm *pgm);
+void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout);
 
 int main(void)
 {
+  signal(SIGINT, SIG_IGN);
+  signal(SIGTTOU, SIG_IGN);
+  signal(SIGTTIN, SIG_IGN);
+
+  pid_t shell_pgid = getpid();
+  setpgid(shell_pgid, shell_pgid);
+  tcsetpgrp(STDIN_FILENO, shell_pgid);
+
   for (;;)
   {
+    while (waitpid(-1, NULL, WNOHANG) > 0); // Reap any zombie processes
+
     char *line;
     line = readline("> ");
 
     // CTRL+D: exit
     if (line == NULL)
     {
-      printf("Exiting...\n");
+      printf("CTRL+D: EXITING...\n");
       exit(0);
     }
 
@@ -67,7 +78,6 @@ int main(void)
       Command cmd;
       if (parse(line, &cmd) == 1)
       {
-
         // Print the parsed command
         print_cmd(&cmd);
 
@@ -75,7 +85,7 @@ int main(void)
         if (strcmp(cmd.pgm->pgmlist[0], "exit") == 0)
         {
           free(line);
-          printf("Exiting...\n");
+          printf("exit: EXITING...\n");
           exit(0);
         }
         else if (strcmp(cmd.pgm->pgmlist[0], "cd") == 0)
@@ -84,33 +94,16 @@ int main(void)
           continue;
         }
 
-        pid_t pid = fork();
-        if (pid < 0)
-        {
-          printf("error accured!");
-          return -1;
-        }
-        else if (pid == 0)
-        {
+        run_command(cmd.pgm, cmd.background, cmd.rstdin, cmd.rstdout);
 
-          // We can pass pgmlist as a vector into execvp, instead of manually
-          // parsing list elements into execlp
-
-          run_command(cmd.pgm);
-
-          /*int result = execvp(cmd.pgm->pgmlist[0], cmd.pgm->pgmlist);
-
-          printf("child process %d - %s \n", result, strerror(errno));
-          write(pipefds[1], &errno, sizeof(int)); */
-          return 0;
-        }
+        if (!cmd.background)
+          tcsetpgrp(STDIN_FILENO, shell_pgid);
       }
       else
       {
         printf("Parse ERROR\n");
       }
     }
-
     // Free the input buffer
     free(line);
   }
@@ -118,7 +111,7 @@ int main(void)
   return 0;
 }
 
-void run_command(Pgm *pgm)
+void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout)
 {
   int num_stages = 0;
 
@@ -139,6 +132,8 @@ void run_command(Pgm *pgm)
   pid_t pids[num_stages];
   int prev_fd = -1; // The read end of the previous pipe
 
+  pid_t job_pgid = 0;
+
   for (int i = 0; i < num_stages; i++)
   {
     int pipefd[2];
@@ -152,6 +147,62 @@ void run_command(Pgm *pgm)
     }
 
     pid_t pid = fork(); // New process for each stage
+
+    if (pid == 0)
+    {
+      if (rstdout != NULL && i >= num_stages - 1)
+      {
+        int fd = open(rstdout, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0)
+        {
+          perror("open");
+          _exit(EXIT_FAILURE);
+        }
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+      }
+
+      if (rstdin != NULL && i == 0)
+      {
+        int fd = open(rstdin, O_RDONLY);
+        if (fd < 0)
+        {
+          perror("open");
+          _exit(EXIT_FAILURE);
+        }
+        dup2(fd, STDIN_FILENO);
+        close(fd);
+      }
+
+
+      if (i == 0)
+      {
+        setpgid(0, 0);
+      }
+      else
+      {
+        setpgid(0, job_pgid);
+      }
+    }
+    else
+    {
+      if (i == 0)
+        job_pgid = pid;
+      setpgid(pid, job_pgid);
+    }
+
+    if (background)
+    {
+      signal(SIGINT, SIG_IGN);
+      signal(SIGTTOU, SIG_IGN);
+      signal(SIGTTIN, SIG_IGN);
+    }
+    else if (pid == 0)
+    {
+      signal(SIGINT, SIG_DFL);
+      signal(SIGTTOU, SIG_DFL);
+      signal(SIGTTIN, SIG_DFL);
+    }
 
     if (pid < 0)
     {
@@ -203,10 +254,16 @@ void run_command(Pgm *pgm)
     prev_fd = (i < num_stages - 1) ? pipefd[0] : -1;
   }
 
-  // Wait for children
-  for (int i = 0; i < num_stages; i++)
+  if (!background)
+    tcsetpgrp(STDIN_FILENO, job_pgid);
+
+  if (background == 0)
   {
-    waitpid(pids[i], NULL, 0);
+    // Wait for children
+    for (int i = 0; i < num_stages; i++)
+    {
+      waitpid(pids[i], NULL, 0);
+    }
   }
 }
 

@@ -9,9 +9,9 @@ Beyond basic commands, you'll explore features such as input/output redirection 
 
 Your shell, `lsh`, must meet the following functional specifications:
 
-1. **Ctrl-D Handling**: Respond to Ctrl-D (EOF) to exit.
+1. **Ctrl-D Handling**: Respond to Ctrl-D (EOF) to exit. -- Done
 
-2. **Basic Commands**: Execute simple commands like `ls`, `date`, and `who`. It should also recognize the `PATH` environment variable to locate commands.
+2. **Basic Commands**: Execute simple commands like `ls`, `date`, and `who`. It should also recognize the `PATH` environment variable to locate commands. -- Done
 
 3. **Background Execution**: Allow running commands in the background, e.g., `sleep 30 &`.
 
@@ -19,7 +19,7 @@ Your shell, `lsh`, must meet the following functional specifications:
 
 5. **I/O Redirection**: Enable standard input and output redirection to files, e.g., `wc -l < /etc/passwd > accounts`.
 
-6. **Built-ins**: Provide `cd` and `exit` as built-in functions.
+6. **Built-ins**: Provide `cd` and `exit` as built-in functions. -- Done
 
 7. **Ctrl-C Handling**: Ctrl-C should terminate the current foreground process but not the shell itself.
                         Ctrl-C should not affect background jobs.
