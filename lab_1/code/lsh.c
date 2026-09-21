@@ -40,24 +40,10 @@ static void print_cmd(Command *cmd);
 static void print_pgm(Pgm *p);
 void stripwhite(char *);
 
-int run_command(Pgm *pgm);
+void run_command(Pgm *pgm);
 
 int main(void)
 {
-  int pipefds[2];
-  int count, err;
-
-  if (pipe(pipefds))
-  {
-    perror("pipe");
-    return EX_OSERR;
-  }
-  if (fcntl(pipefds[1], F_SETFD, fcntl(pipefds[1], F_GETFD) | FD_CLOEXEC))
-  {
-    perror("fcntl");
-    return EX_OSERR;
-  }
-
   for (;;)
   {
     char *line;
@@ -106,7 +92,6 @@ int main(void)
         }
         else if (pid == 0)
         {
-          close(pipefds[0]);
 
           // We can pass pgmlist as a vector into execvp, instead of manually
           // parsing list elements into execlp
@@ -118,19 +103,6 @@ int main(void)
           printf("child process %d - %s \n", result, strerror(errno));
           write(pipefds[1], &errno, sizeof(int)); */
           return 0;
-        }
-        else
-        {
-          close(pipefds[1]);
-          while ((count = read(pipefds[0], &err, sizeof(errno))) == -1)
-            if (errno != EAGAIN && errno != EINTR)
-              break;
-          if (count)
-          {
-            fprintf(stderr, "child's execvp: %s\n", strerror(err));
-          }
-          wait(NULL);
-          close(pipefds[0]);
         }
       }
       else
@@ -146,68 +118,96 @@ int main(void)
   return 0;
 }
 
-int run_command(Pgm *pgm)
+void run_command(Pgm *pgm)
 {
-  if (pgm == NULL)
+  int num_stages = 0;
+
+  for (Pgm *p = pgm; p != NULL; p = p->next)
   {
-    return -1;
+    num_stages++;
   }
 
-  int pipefds[2];
-  if (pipe(pipefds))
+  Pgm *stages[num_stages];
+
+  // Reverse the order of the stages to match the original command order (aestetic)
+  int i = num_stages - 1;
+  for (Pgm *p = pgm; p != NULL; p = p->next, i--)
   {
-    perror("pipe");
-    return EX_OSERR;
-  }
-  if (fcntl(pipefds[1], F_SETFD, fcntl(pipefds[1], F_GETFD) | FD_CLOEXEC))
-  {
-    perror("fcntl");
-    return EX_OSERR;
+    stages[i] = p;
   }
 
-  pid_t pid = fork();
-  if (pid < 0)
+  pid_t pids[num_stages];
+  int prev_fd = -1; // The read end of the previous pipe
+
+  for (int i = 0; i < num_stages; i++)
   {
-    printf("error accured!");
-    return -1;
-  }
-  else if (pid == 0)
-  {
-    close(pipefds[0]);
-    // We can pass pgmlist as a vector into execvp, instead of manually
-    // parsing list elements into execlp
-    run_command(pgm->next);
+    int pipefd[2];
+    int write_fd = -1; // The write end of the current pipe
 
-    char **args = pgm->pgmlist;
-    int result = execvp(args[0], args);
-
-    printf("child process %d - %s \n", result, strerror(errno));
-
-
-    char *out = "test";
-
-    write(pipefds[1], &errno, sizeof(int));
-    close(pipefds[1]);
-    return 0;
-  }
-  else
-  {
-    close(pipefds[1]);
-
-    int count;
-    char *buff = malloc(100 * sizeof(char));
-    int err = 12345678;
-    while ((count = read(pipefds[0], &err, sizeof(errno))) == -1)
-      if (errno != EAGAIN && errno != EINTR)
-        break;
-    wait(NULL);
+    // If this is not the last stage, create a pipe for the next stage
+    if (i < num_stages - 1)
     {
-      fprintf(stderr, "child's execvp: %d\n", err);
+      pipe(pipefd);
+      write_fd = pipefd[1];
     }
-    close(pipefds[0]);
-    free(buff);
+
+    pid_t pid = fork(); // New process for each stage
+
+    if (pid < 0)
+    {
+      perror("fork");
+      _exit(EXIT_FAILURE);
+    }
+    else if (pid == 0) // Child
+    {
+      // Open the pipe ends for the current stage
+      if (prev_fd != -1) // First stage has no pipe end to read from
+      {
+        dup2(prev_fd, STDIN_FILENO);
+      }
+      if (write_fd != -1) // Last stage has no pipe end to write to
+      {
+        dup2(write_fd, STDOUT_FILENO);
+      }
+
+      // Dup2 will not consume the file descriptors, so we need to close them in the child process
+      if (prev_fd != -1)
+      {
+        close(prev_fd);
+      }
+      if (write_fd != -1)
+      {
+        close(write_fd);
+      }
+      if (i < num_stages - 1)
+      {
+        close(pipefd[0]); // this stage doesn't read from the pipe, so close the read end
+      }
+
+      execvp(stages[i]->pgmlist[0], stages[i]->pgmlist);
+      perror("execvp");
+      _exit(EXIT_FAILURE);
+    }
+
+    pids[i] = pid;
+
+    if (prev_fd != -1)
+    {
+      close(prev_fd);
+    }
+    if (write_fd != -1)
+    {
+      close(write_fd);
+    }
+
+    prev_fd = (i < num_stages - 1) ? pipefd[0] : -1;
   }
-  return 0;
+
+  // Wait for children
+  for (int i = 0; i < num_stages; i++)
+  {
+    waitpid(pids[i], NULL, 0);
+  }
 }
 
 /*
@@ -283,34 +283,3 @@ void stripwhite(char *string)
 }
 
 #define ResizeBy 8
-
-int breakStringToStringArray(char *string, char breakBy, char ***arrayPointer)
-{
-  size_t strLen = strlen(string);
-
-  char *newString = malloc(strLen);
-
-  *arrayPointer = malloc(sizeof(char **) * ResizeBy);
-
-  int progress = 0;
-
-  (*arrayPointer)[progress++] = newString;
-
-  memcpy(newString, string, strLen);
-
-  for (char *ptr = newString; *ptr != '\0'; ptr++)
-  {
-    if (*ptr == breakBy)
-    {
-      *ptr = '\0';
-
-      if (progress % ResizeBy == 0)
-        *arrayPointer =
-            realloc(*arrayPointer, sizeof(char **) * (ResizeBy + progress));
-
-      (*arrayPointer)[progress++] = ptr + 1;
-    }
-  }
-
-  return progress;
-}
