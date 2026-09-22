@@ -39,6 +39,7 @@
 
 static void print_cmd(Command *cmd);
 static void print_pgm(Pgm *p);
+static void reap_children(int sig);
 void stripwhite(char *);
 
 void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout);
@@ -48,6 +49,7 @@ int main(void)
   signal(SIGINT, SIG_IGN);
   signal(SIGTTOU, SIG_IGN);
   signal(SIGTTIN, SIG_IGN);
+  signal(SIGCHLD, reap_children);
 
   pid_t shell_pgid = getpid();
   setpgid(shell_pgid, shell_pgid);
@@ -55,8 +57,6 @@ int main(void)
 
   for (;;)
   {
-    while (waitpid(-1, NULL, WNOHANG) > 0); // Reap any zombie processes
-
     char *line;
     line = readline("> ");
 
@@ -96,6 +96,7 @@ int main(void)
 
         run_command(cmd.pgm, cmd.background, cmd.rstdin, cmd.rstdout);
 
+
         if (!cmd.background)
           tcsetpgrp(STDIN_FILENO, shell_pgid);
       }
@@ -123,10 +124,10 @@ void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout)
   Pgm *stages[num_stages];
 
   // Reverse the order of the stages to match the original command order (aestetic)
-  int i = num_stages - 1;
-  for (Pgm *p = pgm; p != NULL; p = p->next, i--)
+  int y = num_stages - 1;
+  for (Pgm *p = pgm; p != NULL; p = p->next, y--)
   {
-    stages[i] = p;
+    stages[y] = p;
   }
 
   pid_t pids[num_stages];
@@ -174,7 +175,6 @@ void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout)
         close(fd);
       }
 
-
       if (i == 0)
       {
         setpgid(0, 0);
@@ -193,12 +193,14 @@ void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout)
 
     if (background)
     {
+      printf("Background process group: %d\n", job_pgid);
       signal(SIGINT, SIG_IGN);
       signal(SIGTTOU, SIG_IGN);
       signal(SIGTTIN, SIG_IGN);
     }
     else if (pid == 0)
     {
+      printf("Foreground process group: %d\n", job_pgid);
       signal(SIGINT, SIG_DFL);
       signal(SIGTTOU, SIG_DFL);
       signal(SIGTTIN, SIG_DFL);
@@ -256,16 +258,30 @@ void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout)
 
   if (!background)
     tcsetpgrp(STDIN_FILENO, job_pgid);
-
   if (background == 0)
   {
+    signal(SIGCHLD, SIG_DFL);
+
     // Wait for children
     for (int i = 0; i < num_stages; i++)
     {
       waitpid(pids[i], NULL, 0);
     }
+    
+    signal(SIGCHLD, reap_children);
   }
 }
+
+static void reap_children(int sig)
+{
+    (void)sig;
+
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+    {
+        // Reap all finished children.
+    }
+}
+
 
 /*
  * Print a Command structure as returned by parse on stdout.
