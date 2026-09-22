@@ -42,7 +42,7 @@ static void print_pgm(Pgm *p);
 static void reap_children(int sig);
 void stripwhite(char *);
 
-void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout);
+void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout, int shell_pgid);
 
 int main(void)
 {
@@ -94,7 +94,7 @@ int main(void)
           continue;
         }
 
-        run_command(cmd.pgm, cmd.background, cmd.rstdin, cmd.rstdout);
+        run_command(cmd.pgm, cmd.background, cmd.rstdin, cmd.rstdout, shell_pgid);
 
 
         if (!cmd.background)
@@ -112,7 +112,7 @@ int main(void)
   return 0;
 }
 
-void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout)
+void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout, int shell_pgid)
 {
   int num_stages = 0;
 
@@ -175,32 +175,42 @@ void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout)
         close(fd);
       }
 
-      if (i == 0)
+      if (i == 0 && !background)
       {
-        setpgid(0, 0);
+        setpgid(0, shell_pgid);
+      }
+      else if (i == 0 && background)
+      {
+        setpgid(0, job_pgid);
+      }
+      else if (background){
+        setpgid(0, job_pgid);
       }
       else
       {
-        setpgid(0, job_pgid);
+        setpgid(0, shell_pgid);
       }
     }
     else
     {
-      if (i == 0)
+      if (i == 0 && background){
         job_pgid = pid;
+      }
+      else if (i == 0 && !background)
+      {
+        job_pgid = shell_pgid;
+      }
       setpgid(pid, job_pgid);
     }
 
     if (background)
     {
-      printf("Background process group: %d\n", job_pgid);
       signal(SIGINT, SIG_IGN);
       signal(SIGTTOU, SIG_IGN);
       signal(SIGTTIN, SIG_IGN);
     }
     else if (pid == 0)
     {
-      printf("Foreground process group: %d\n", job_pgid);
       signal(SIGINT, SIG_DFL);
       signal(SIGTTOU, SIG_DFL);
       signal(SIGTTIN, SIG_DFL);
@@ -238,6 +248,12 @@ void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout)
       }
 
       execvp(stages[i]->pgmlist[0], stages[i]->pgmlist);
+
+      // Restore default signal handlers in the child process before exiting
+      signal(SIGINT, SIG_IGN);
+      signal(SIGTTOU, SIG_IGN);
+      signal(SIGTTIN, SIG_IGN);
+
       perror("execvp");
       _exit(EXIT_FAILURE);
     }
