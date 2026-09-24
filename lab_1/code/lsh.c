@@ -183,7 +183,8 @@ void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout, int shel
       {
         setpgid(0, job_pgid);
       }
-      else if (background){
+      else if (background)
+      {
         setpgid(0, job_pgid);
       }
       else
@@ -193,7 +194,8 @@ void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout, int shel
     }
     else
     {
-      if (i == 0 && background){
+      if (i == 0 && background)
+      {
         job_pgid = pid;
       }
       else if (i == 0 && !background)
@@ -203,13 +205,7 @@ void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout, int shel
       setpgid(pid, job_pgid);
     }
 
-    if (background)
-    {
-      signal(SIGINT, SIG_IGN);
-      signal(SIGTTOU, SIG_IGN);
-      signal(SIGTTIN, SIG_IGN);
-    }
-    else if (pid == 0)
+    if (pid == 0)
     {
       signal(SIGINT, SIG_DFL);
       signal(SIGTTOU, SIG_DFL);
@@ -283,19 +279,19 @@ void run_command(Pgm *pgm, int background, char *rstdin, char *rstdout, int shel
     {
       waitpid(pids[i], NULL, 0);
     }
-    
+
     signal(SIGCHLD, reap_children);
   }
 }
 
 static void reap_children(int sig)
 {
-    (void)sig;
+  (void)sig;
 
-    while (waitpid(-1, NULL, WNOHANG) > 0)
-    {
-        // Reap all finished children.
-    }
+  while (waitpid(-1, NULL, WNOHANG) > 0)
+  {
+    // Reap all finished children.
+  }
 }
 
 

@@ -1,327 +1,417 @@
-from datetime import datetime
-from os import mkdir, setsid, kill, killpg, getpgid
-from pathlib import Path
-from signal import SIGINT, SIGTERM
-from socket import gethostname
-from subprocess import run, PIPE, Popen, TimeoutExpired
-from tempfile import gettempdir
-from time import sleep, time
-import unittest
-from typing import Optional
+"""
+This script runs a number of tests against your lsh shell implementation.
+If your shell passes all these tests, it's a good sign that it's working
+properly, but you should still manually test it yourself.
 
+To run it, set up a venv with the packages in requirements.txt:
+
+  # in the tests directory:
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+
+And then, simply run this script. It will build anew and test an lsh
+implementation whose source is in '../code' relative to where you run the script
+from. If your lsh code is somewhere else, this default directory can be
+overridden by setting the LSH_CODE environment variable. So, your options are:
+
+  # if your lsh code is in the repo's lab_1/code, and you are running this from
+  # lab_1/test:
+  python test.py
+
+  # if your lsh code is anywhere else:
+  LSH_CODE=<your code dir> python test.py
+
+---
+Jacob Garby <garby@chalmers.se>
+Sept 2026
+"""
+
+import pty, os
+from time import sleep
+from psutil import Process, TimeoutExpired, STATUS_ZOMBIE
+from signal import SIGINT
+from datetime import datetime
+from tempfile import TemporaryDirectory as TempDir, mkdtemp
+import select
+import psutil
+import unittest
 from HTMLTestRunner.runner import HTMLTestRunner
-from psutil import Process as ProcessInfo
-from psutil import STATUS_ZOMBIE
+import subprocess as sp
+from pathlib import Path
+
+LSH_CODE = "../code/"
+if "LSH_CODE" in os.environ:
+    LSH_CODE = os.environ["LSH_CODE"]
+    print(f"(Using custom LSH_CODE from env: {LSH_CODE})")
+
+LSH_CODE = Path(LSH_CODE).resolve()
+
+
+class Shell:
+    def __init__(self, exe):
+        self.exe = exe
+        self.fd = None
+        self.pid = None
+
+    def start(self):
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execv(self.exe, [self.exe])
+            print(f"ERROR: Couldn't run {self.exe}")
+            os.exit(1)
+        else:
+            self.pid = pid
+            self.fd = fd
+            print(f"Running {self.exe}, pid={self.pid}, tty fd={self.fd}")
+
+    def read_available(self):
+        if self.fd is None:
+            return b""
+        r, _, _ = select.select([self.fd], [], [], 0.5)
+        if r:
+            try:
+                return os.read(self.fd, 65536)
+            except OSError:
+                return b""
+        return b""
+
+    def eof(self, wait_after=0.5):
+        if self.fd is None:
+            return
+        self.read_available()
+        print("Sending EOF to lsh")
+        os.write(self.fd, b"\x04")
+        sleep(wait_after)
+
+    def sendline(self, cmd, wait_after=0.5):
+        if self.fd is None:
+            return
+        self.read_available()
+        cmdbytes = bytes(cmd + "\n", "utf-8")
+        print(f"Sending cmd '{cmd}' to lsh")
+        os.write(self.fd, cmdbytes)
+        sleep(wait_after)
+
+    def run_see_cmd(self, cmd, wait=0.5):
+        if self.fd is None:
+            return ""
+        self.sendline(cmd, wait_after=wait)
+        return self.read_available().decode()
+
+    def ctrl_c(self, wait_after=0.5):
+        if self.fd is None:
+            return
+        self.read_available()
+        print("Sending Ctrl-C to lsh")
+        os.write(self.fd, b"\x03")
+        sleep(wait_after)
+
+    def children(self):
+        if self.pid is None:
+            return []
+        ret = Process(self.pid).children()
+        return ret
+
+    def proc(self):
+        return Process(self.pid)
+
+    def alive(self):
+        if self.pid is None:
+            return False
+        return psutil.pid_exists(self.pid)
+
+    def has_zombies(self):
+        for ch in self.children():
+            if ch.status() == STATUS_ZOMBIE:
+                return True
+        return False
 
 
 class TestLsh(unittest.TestCase):
-
-    lsh_path: Path
-    lsh: Optional[Popen]
-
     @classmethod
     def setUpClass(cls) -> None:
-        """
-        Compile lsh from source before running the tests.
-        """
-        code_dir = Path(__file__).resolve().parent.parent.joinpath("code")
-        print("The expected code_dir is: ", code_dir)
-        build_dir = cls.make_tmp_dir()
-        run(["cmake", "-B", build_dir, "-S", code_dir], check=True)
-        run(["cmake", "--build", build_dir], check=True)
-        cls.lsh_path = build_dir.joinpath("lsh")
+        cls.build_dir = mkdtemp()
+        print(f"Building lsh to {cls.build_dir}")
+        sp.run(["cmake", "-B", cls.build_dir, "-S", LSH_CODE], check=True)
+        sp.run(["cmake", "--build", cls.build_dir], check=True)
+        cls.lsh_path = cls.build_dir + "/lsh"
+        print(f"lsh built at {cls.lsh_path}")
+
+    @classmethod
+    def tearDownClass(cls):
+        # Sanity check that build_dir is in /tmp, before rm -rf'ing it
+        if cls.build_dir.startswith("/tmp"):
+            print(f"\n(Cleaning temporary build dir {cls.build_dir})")
+            sp.run(["rm", "-rf", cls.build_dir], check=True)
 
     def setUp(self):
-        """
-        Initializes the process state before each test.
-        """
-        self.lsh = None
+        print(f"Using lsh at {self.lsh_path}")
+        self.lsh = Shell(exe=self.lsh_path)
+        self.lsh.start()
 
     def tearDown(self):
-        """
-        Cleans up after each test by terminating lsh if it is still running.
-        """
-        self.assertIsNotNone(self.lsh)
-        if self.lsh.poll() is None:
-            print("tearDown: lsh is still running, killing it now.")
-            self.lsh.kill()
-
-            # Ensure that the process is cleaned up
-            self.lsh.wait(timeout=3)
-
-    def check_for_zombies(self):
-        """
-        Verifies that no child processes of lsh have become zombies.
-        """
-        self.assertIsNotNone(self.lsh)
-        lsh_info = ProcessInfo(pid=self.lsh.pid)
-        for child in lsh_info.children():
-            self.assertNotEqual(STATUS_ZOMBIE, child.status(), msg=f"Zombie detected!")
-
-    @staticmethod
-    def make_tmp_dir() -> Path:
-        """
-        Creates a temporary directory.
-        """
-        tmp_dir = Path(gettempdir()).joinpath("test_lab1_" + str(time()))
-        mkdir(tmp_dir)
-        return tmp_dir
-
-    @staticmethod
-    def make_test_txt(cwd: Path):
-        """
-        Generates a test.txt file containing "hello" for input/output redirection tests.
-        """
-        with open(cwd.joinpath("test.txt"), "w") as f:
-            f.write("hello")
-
-    def check_test_txt(self, file: Path):
-        """
-        Validates that the content of a file is "hello\n".
-        """
-        try:
-            with open(file, "r") as f:
-                content = f.readlines()
-            self.assertListEqual(content, ["hello\n"], msg="The redirected output was not written to the file")
-        except FileNotFoundError:
-            self.assertTrue(file.exists(), msg="The output file was not created")
-
-    def start_lsh(self, cwd: Path = None):
-        """
-        Launches lsh with an optional custom working directory.
-        """
-        self.assertIsNone(self.lsh)
-        self.lsh = Popen(str(self.lsh_path), stdin=PIPE, stdout=PIPE, stderr=PIPE, cwd=cwd, preexec_fn=setsid)
-
-    def run_cmd(self, cmd: str):
-        """
-        Writes a command to lsh's stdin and ensures the command is processed by flushing the stream.
-        """
-        self.assertIsNotNone(self.lsh)
-        self.lsh.stdin.write(f"{cmd}\n".encode())
-        self.lsh.stdin.flush()
-
-        # At this point, the command has been written to lsh's stdin
-        # Give lsh some time to start and invoke the command
-        sleep(1)
-
-    def exit_with_eof(self) -> str:
-        """
-        Signals EOF to lsh and checks for graceful termination and a valid exit code.
-        """
-        is_lsh_exiting_with_eof = True
-        try:
-            # Place EOF in lsh's stdin
-            out, err = self.lsh.communicate(timeout=3)
-            self.assertEqual("", err.decode())
-            self.assertEqual(0, self.lsh.returncode,
-                             msg="lsh should return 0 after exiting with EOF. \n"
-                             "If the return code is not 0, a runtime assertion may be failing in your implementation. \n"
-                             "Check your assertions and ensure that they are not triggering any faults.")
-
-            return out.decode()
-        except TimeoutExpired:
-            is_lsh_exiting_with_eof = False
-
-        self.assertTrue(is_lsh_exiting_with_eof,
-                        "lsh did not terminate upon EOF. \n"
-                        "This may indicate that the feature is missing (exit on EOF) or that lsh has become unresponsive. \n"
-                        "Ensure that 'waitpid' calls target the correct PID.")
-
-    def run_cmd_and_exit(self, cmd: str, check_for_zombies: bool = False) -> str:
-        """
-        Runs a command in lsh, optionally checks for zombie processes, and handles process termination with EOF.
-        """
-        self.run_cmd(cmd)
-        if check_for_zombies:
-            self.check_for_zombies()
-        return self.exit_with_eof()
+        if self.lsh.alive():
+            try:
+                p = self.lsh.proc()
+                p.kill()
+                p.wait(timeout=3)
+            except TimeoutExpired:
+                print("lsh took too long to shut down")
 
     def test_exit_command(self):
         """
-        Tests that the 'exit' command properly terminates 'lsh'.
+        Check that 'exit' command terminates the shell.
         """
-        self.start_lsh()
-        self.run_cmd("exit")
+        proc = self.lsh.proc()
+        self.lsh.sendline("exit", wait_after=0)
 
-        # Wait up to three seconds for lsh to exit
         try:
-            self.lsh.wait(3)
+            ret = proc.wait(3)
+            self.assertEqual(ret, 0, msg="shell should return 0 on exit")
         except TimeoutExpired:
-            self.assertTrue(False, msg="The built-in exit command does not appear to be implemented")
+            self.assertTrue(False, msg="'exit' command didn't terminate the shell")
 
-        self.assertEqual(0, self.lsh.returncode, msg="lsh should return 0 after executing exit")
+    def test_eof(self):
+        """
+        Check that EOF (Ctrl-D) correctly terminates the shell.
+        """
+        proc = self.lsh.proc()
 
-    def test_exit_with_CTRL_D(self):
-        """
-        Tests that lsh terminates correctly when EOF (Ctrl-D) is sent to stdin.
-        """
-        self.start_lsh()
-        self.exit_with_eof()
+        self.lsh.read_available()
+        self.lsh.eof(wait_after=0)
 
-    def test_date(self):
-        r"""
-        Runs "date" and checks whether the current year appears in stdout.
-        """
-        self.start_lsh()
-        current_year = str(datetime.now().year)
-        self.assertIn(current_year, self.run_cmd_and_exit("date"))
+        try:
+            ret = proc.wait(timeout=5)
+            print(f"wait returned {ret}")
+            self.assertEqual(ret, 0, msg="shell should return 0 on eof")
+        except TimeoutExpired:
+            self.assertTrue(False, msg="shell should terminate on eof")
 
-    def test_output_redirection(self):
+    def test_simple(self):
         """
-        Tests lsh's ability to handle output redirection.
-        Runs 'echo hello > hello.txt' and verifies the content of the resulting file.
+        Simply runs date and checks if it works. A simple command with one program, one argument.
         """
-        cwd = self.make_tmp_dir()
-        self.start_lsh(cwd)
+        year = str(datetime.now().year)
+        self.assertIn(year, self.lsh.run_see_cmd("date"))
 
-        out = cwd.joinpath("hello.txt")
-        self.run_cmd_and_exit("echo hello > ./hello.txt")
-        self.check_test_txt(out)
-
-    def test_input_redirection(self):
+    def test_simple2(self):
         """
-        Tests the input redirection capability.
-        Creates a file with known content (test.txt) and uses 'grep el < ./test.txt' to search it.
+        A simple command with one program, but this time with two arguments.
         """
-        cwd = self.make_tmp_dir()
-        self.start_lsh(cwd)
+        self.assertIn("teststring", self.lsh.run_see_cmd("echo teststring"))
 
-        self.make_test_txt(cwd)
-        out = self.run_cmd_and_exit("grep el < ./test.txt")
-        self.assertIn("hello", out)
-
-    def test_in_and_out_redirection(self):
+    def test_output_redirect(self):
         """
-        Tests both input and output redirection together.
-        Creates a file with known content (test.txt) and uses 'grep hello < test.txt > test_out.txt'
-        to filter its content and redirect the output to another file.
+        Redirecting the output of a command to a file.
         """
-        cwd = self.make_tmp_dir()
-        self.start_lsh(cwd)
+        with TempDir() as cwd:
+            out = cwd + "/out.txt"
+            self.lsh.sendline(f"echo hello > {out}")
+            with open(out, "r") as f:
+                self.assertIn(
+                    "hello",
+                    f.readlines()[0],
+                    msg="echo was not successfully redirected to output file",
+                )
 
-        self.make_test_txt(cwd)
-        out = cwd.joinpath("test_out.txt")
-        self.run_cmd_and_exit("grep hello < test.txt > test_out.txt")
-        self.check_test_txt(out)
+    def test_input_redirect(self):
+        """
+        Redirecting the input of a command from a file.
+        """
+        with TempDir() as cwd:
+            infile = cwd + "/in.txt"
+            with open(infile, "w") as f:
+                f.write("input text\n")
+            self.assertIn(
+                "input text",
+                self.lsh.run_see_cmd(f"cat < {infile}"),
+                msg="cat didn't read from input file",
+            )
+
+    def test_in_out_redirect(self):
+        """
+        Redirecting to/from files into and out from a command.
+        """
+        with TempDir() as cwd:
+            infile = cwd + "/in.txt"
+            outfile = cwd + "/out.txt"
+            with open(infile, "w") as f:
+                f.write("input\n")
+            self.lsh.sendline(f"cat < {infile} > {outfile}")
+            with open(outfile, "r") as f:
+                self.assertIn(
+                    "input",
+                    f.readlines()[0],
+                    msg="cat didn't write from in.txt to out.txt",
+                )
+
+    def test_consecutive_fg(self):
+        """
+        Test two consecutive foreground commands, and ensure no zombies and correct output.
+        """
+        out1 = self.lsh.run_see_cmd("echo command1")
+        out2 = self.lsh.run_see_cmd("echo command2")
+
+        self.assertIn(
+            "command1",
+            out1,
+            msg="expected to see output from first command",
+        )
+
+        self.assertNotIn(
+            "command1",
+            out2,
+            msg="expected to not see output from first command in second command",
+        )
+
+        self.assertIn(
+            "command2",
+            out2,
+            msg="expected to see output from second command",
+        )
+
+        self.assertFalse(self.lsh.has_zombies(), msg="should not have zombies")
+
+    def test_pipeline(self):
+        """
+        Test simple pipeline.
+        """
+        out = self.lsh.run_see_cmd("echo smetsysgnitarepo | rev")
+
+        self.assertIn(
+            "operatingsystems",
+            out,
+            msg="rev command in pipeline didn't work",
+        )
+
+        self.assertFalse(self.lsh.has_zombies(), msg="shouldn't have zombies")
+
+    def test_pipeline_concurrency(self):
+        """
+        All processes in a pipeline should run concurrently.
+        """
+        self.lsh.sendline("sleep 30 | sleep 30 | sleep 30 | sleep 30")
+
+        self.assertEqual(
+            4,
+            len(self.lsh.children()),
+            msg="All processes in a pipeline should run concurrently; they should not wait for others to finish before starting",
+        )
+
+        self.lsh.ctrl_c(wait_after=1)
+        self.assertEqual(
+            0,
+            len(self.lsh.children()),
+            msg="All processes in foreground pipeline should respond to Ctrl-C",
+        )
+
+        self.assertFalse(self.lsh.has_zombies(), msg="Shouldn't have zombie processes")
 
     def test_cd(self):
         """
-        Verifies the functionality of the 'cd' command in lsh.
-        The test creates a temporary directory and a test file within it.
-        It runs the 'cd' command to change to this temporary directory
-        and uses 'ls' to confirm the presence of the test file.
+        cd command to change directory
         """
-        tmp_dir = self.make_tmp_dir()
-        with open(tmp_dir.joinpath("hello.txt"), "w") as f:
-            f.write("")
-        cwd = tmp_dir.parent
-        self.start_lsh(cwd)
+        with TempDir() as tmp:
+            abs_tmp = Path(tmp).resolve()
+            self.lsh.sendline(f"cd {abs_tmp}")
+            self.assertEqual(
+                abs_tmp,
+                Path(self.lsh.proc().cwd()).resolve(),
+                msg="`cd` seemingly didn't change the directory",
+            )
 
-        out = self.run_cmd_and_exit(f"cd {tmp_dir}\nls")
-
-        # Check whether the ls output contains hello.txt to verify that cd works
-        self.assertIn("hello.txt", out)
-
-    def test_for_zombies(self):
+    def test_ctrl_c(self):
         """
-        Runs two consecutive commands and checks their output and any zombie processes.
+        Test behaviour of Ctrl-C with just a simple foreground process.
         """
-        self.start_lsh()
-        self.run_cmd("hostname")
-        self.run_cmd("date")
-        self.check_for_zombies()
-        out = self.exit_with_eof()
-        self.assertIn(gethostname(), out, msg="Did not find expected output from the first command")
-        current_year = str(datetime.now().year)
-        self.assertIn(current_year, out, msg="Did not find expected output from the second command")
+        self.lsh.sendline("sleep 100")
+        self.lsh.ctrl_c()
+        self.assertEqual(
+            0,
+            len(self.lsh.children()),
+            msg="Ctrl-C didn't terminate foreground child.",
+        )
 
-    def test_echo_rev(self):
+    def test_fg_bg(self):
         """
-        Tests the pipeline functionality.
-        Reverses a string using 'echo ananab | rev' and expects 'banana' in the output.
+        Test running a background process at the same time as a foreground one.
         """
-        self.start_lsh()
-        out = self.run_cmd_and_exit('echo ananab | rev', check_for_zombies=True)
-        self.assertIn("banana", out)
+        self.lsh.sendline("sleep 3 &")
 
-    def test_echo_grep_wc(self):
-        """
-        Validates a complex command pipeline involving 'echo', 'grep', and 'wc'.
-        """
-        self.start_lsh()
-        out = self.run_cmd_and_exit("echo hello world | grep hello | wc -w\n", check_for_zombies=True)
-        self.assertIn("2", out)
+        self.assertEqual(
+            len(self.lsh.children()),
+            1,
+            msg="it seems no background process was created",
+        )
 
-    def test_bg_and_fg(self):
-        """
-        Runs a background job and a foreground command simultaneously.
-        """
-        self.start_lsh()
-        self.run_cmd("sleep 3 &")
+        self.assertEqual(
+            ["sleep", "3"],
+            self.lsh.children()[0].cmdline(),
+            msg="the created background process was not running sleep 3",
+        )
 
-        # Check whether the background process started
-        lsh_info = ProcessInfo(self.lsh.pid)
-        self.assertEqual(1, len(lsh_info.children()), msg="Could not detect the background process")
-
-        # Execute a foreground command
-        self.run_cmd("echo hello")
-
-        # Wait for background command to complete
+        self.lsh.sendline("echo foreground", wait_after=0)
         sleep(3)
+        self.assertFalse(self.lsh.has_zombies(), msg="should not have zombies")
 
-        self.check_for_zombies()
-        self.exit_with_eof()
-
-    def test_CTRL_C(self):
+    def test_ctrl_c_fg_bg(self):
         """
-        Simulates a CTRL-C interrupt to test lsh's signal handling by running a long sleep command and interrupting it.
+        Check that Ctrl-C will kill a foreground process, but not a background one.
         """
-        self.start_lsh()
-        self.run_cmd("sleep 60")
+        self.lsh.sendline("sleep 100 &")
+        self.assertEqual(
+            1,
+            len(self.lsh.children()),
+            msg="Not exactly 1 child after executing background command 'cat &'",
+        )
+        bg_pid = self.lsh.children()[0].pid
 
-        # Give lsh some time to start and invoke the command
-        sleep(1)
+        self.lsh.sendline("sleep 100")
+        self.assertEqual(
+            2,
+            len(self.lsh.children()),
+            msg="Expected two children, one foreground and one background",
+        )
 
-        # Simulate pressing CTRL-C by sending SIGINT to the entire lsh process group
-        killpg(getpgid(self.lsh.pid), SIGINT)
+        self.lsh.ctrl_c()
+        self.assertEqual(
+            1, len(self.lsh.children()), msg="Expected one child after Ctrl-C"
+        )
 
-        # Check whether the foreground process terminated
-        lsh_info = ProcessInfo(self.lsh.pid)
-        self.assertEqual(0, len(lsh_info.children()),
-                         msg="Expected no child processes to remain after sending SIGINT to simulate CTRL-C, \n"
-                             "indicating that all foreground processes should be terminated.")
+        self.assertEqual(
+            bg_pid,
+            self.lsh.children()[0].pid,
+            msg="Seems the terminated process was the background process",
+        )
 
-        self.exit_with_eof()
-
-    def test_CTRL_C_with_fg_and_bg(self):
+    def test_bg_sigint(self):
         """
-        Tests lsh's response to a CTRL-C signal with concurrent foreground and background processes.
-        Ensures that only the foreground process is terminated and that the background process remains running.
+        While a background process should not terminate on Ctrl-C, it should terminate if it directly receives a SIGINT
         """
-        self.start_lsh()
-        self.run_cmd(cmd="sleep 60 &")
+        self.lsh.sendline("sleep 100 &")
+        self.assertEqual(
+            1, len(self.lsh.children()), msg="Background process isn't running"
+        )
+        bg = self.lsh.children()[0]
+        os.kill(bg.pid, SIGINT)
+        print(f"Killed {bg.pid}")
+        sleep(0.5)
+        print(f"Children: {self.lsh.children()}")
+        self.assertEqual(
+            0,
+            len(self.lsh.children()),
+            msg="Background process *should* terminate from SIGINT",
+        )
 
-        # Store the PID of the background process
-        lsh_info = ProcessInfo(self.lsh.pid)
-        self.assertEqual(1, len(lsh_info.children()), msg="Expected exactly one child process "
-                                                          "after executing a background command")
-        bg_pid = lsh_info.children()[0].pid
-
-        # Start the foreground process
-        self.run_cmd("sleep 60")
-        self.assertEqual(2, len(lsh_info.children()), msg="Expected one foreground process "
-                                                          "and one background process at the same time")
-
-        # Simulate pressing "Ctrl-C" by sending SIGINT to the entire lsh process group
-        killpg(getpgid(self.lsh.pid), SIGINT)
-        sleep(1)
-
-        self.assertEqual(1, len(lsh_info.children()), msg="There should be only one child process after Ctrl+C")
-        self.assertEqual(bg_pid, lsh_info.children()[0].pid, msg="You should not have terminated the background process")
-
-        kill(bg_pid, SIGTERM)
-        self.exit_with_eof()
 
 if __name__ == "__main__":
-    unittest.main(testRunner=HTMLTestRunner(report_name="test-lsh", open_in_browser=True, description="Lab 1 tests"))
+    unittest.main(
+        testRunner=HTMLTestRunner(
+            title="Operating Systems Lab 1",
+            description=f"Unit tests for lsh built from {LSH_CODE}",
+            report_name="test-lsh",
+            tested_by=os.getlogin(),
+            open_in_browser=True,
+        )
+    )
